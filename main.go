@@ -1,74 +1,107 @@
 package main
 
 import (
-	"fmt"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
+
+	"github.com/go-chi/chi/v5"
 )
 
-type server struct {
-	router *http.ServeMux
-	logger *log.Logger
+// Item represents our data structure. Note the json tags.
+type Item struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+	Age  int    `json:"age"`
 }
 
-func newServer() *server {
-	newLogger := log.New(os.Stdout, "WEB: ", log.LstdFlags)
+// server holds all our application's dependencies.
+type server struct {
+	logger    *log.Logger
+	router    chi.Router
+	datastore map[int]Item // Our simple in-memory database. Key is the item ID.
+}
 
-	// Create the server instance.
+// newServer is the constructor for our server. It sets everything up.
+func newServer() *server {
+	logger := log.New(os.Stdout, "API: ", log.LstdFlags)
+	router := chi.NewRouter()
+
 	s := &server{
-		router: http.NewServeMux(),
-		logger: newLogger,
+		logger:    logger,
+		router:    router,
+		datastore: make(map[int]Item), // Initialize the map!
 	}
 
-	// Set up the routes for the server we just created.
+	// Set up the routes after the server is created.
 	s.routes()
-
 	return s
 }
 
-func (s *server) helloHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		s.logger.Printf("received request for %s from %s", r.URL.Path, r.RemoteAddr)
-		fmt.Fprintf(w, "Hello from a server that logs things!")
-	}
-}
-
-func (s *server) goodbyeHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		s.logger.Printf("received request for %s from %s ", r.URL.Path, r.RemoteAddr)
-		fmt.Fprintf(w, "Goodbye from a server that logs things!")
-	}
-}
-
-func (s *server) itemHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		s.logger.Printf("received request for %s from %s ", r.URL.Path, r.RemoteAddr)
-		switch r.Method {
-		case http.MethodGet:
-			fmt.Fprintf(w, "Here are all the items that u requested")
-		case http.MethodPost:
-			fmt.Fprintf(w, "new item is inserted")
-		case http.MethodPut:
-			fmt.Fprintf(w, "item data is changed")
-		default:
-			// It's good practice to handle other methods too.
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	}
-}
-
+// routes defines all the application's endpoints.
 func (s *server) routes() {
-	s.router.HandleFunc("/", s.helloHandler())
-	s.router.HandleFunc("/goodbye", s.goodbyeHandler())
-	s.router.HandleFunc("/items", s.itemHandler())
+	s.router.Post("/items", s.handleCreateItem())
+	s.router.Get("/items/{id}", s.handleGetItem())
+}
+
+// handleCreateItem handles requests to create a new item.
+func (s *server) handleCreateItem() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var newItem Item
+		// Decode the incoming JSON from the request body.
+		err := json.NewDecoder(r.Body).Decode(&newItem)
+		if err != nil {
+			s.logger.Printf("ERROR decoding request body: %v", err)
+			http.Error(w, "Bad request: invalid JSON", http.StatusBadRequest)
+			return
+		}
+
+		// Store the new item in our datastore map using its ID as the key.
+		s.datastore[newItem.ID] = newItem
+		s.logger.Printf("Successfully created and stored item: %+v", newItem)
+
+		// Respond to the client.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated) // 201 Created
+		json.NewEncoder(w).Encode(newItem)
+	}
+}
+
+// handleGetItem handles requests to retrieve a single item by its ID.
+func (s *server) handleGetItem() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Use chi.URLParam to get the "id" from the URL path.
+		idStr := chi.URLParam(r, "id")
+
+		// Convert the ID from a string to an integer.
+		id, err := strconv.Atoi(idStr)
+		if err != nil {
+			s.logger.Printf("ERROR converting ID to int: %v", err)
+			http.Error(w, "Invalid item ID", http.StatusBadRequest)
+			return
+		}
+
+		// Look up the item in our datastore.
+		item, found := s.datastore[id]
+		if !found {
+			s.logger.Printf("Item with ID %d not found", id)
+			http.Error(w, "Item not found", http.StatusNotFound) // 404 Not Found
+			return
+		}
+
+		// Respond with the found item.
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(item)
+	}
 }
 
 func main() {
 	server := newServer()
+	server.logger.Println("Server starting on port :8080...")
 
-	server.logger.Printf("Server is starting on port :8080")
-
+	// Start the server using the chi router.
 	err := http.ListenAndServe(":8080", server.router)
 	if err != nil {
 		server.logger.Fatalf("Cannot start server: %v", err)
